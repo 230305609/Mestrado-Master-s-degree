@@ -17,7 +17,7 @@ str(dados_bacterias)
 dados_bacterias <- dados_bacterias %>%
   rename(
     genome_size_bp = `Genome Size (bp)`,
-    percent_is = `% Quantity of Families`
+    percent_is = `% Quantity of Families` # Families or Elements, depende do excel
   )
 
 ## Converter ambas as colunas para numérico ANTES da transformação log
@@ -40,98 +40,169 @@ head(dados_transformados)
 str(dados_transformados$genome_size_bp)
 str(dados_transformados$percent_is)
 
-\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+################################################################################
 #* Se o arquivo excel contiver linhas com % Quantity of Elements/percent_is igual a zero ou NA, essas linhas devem ser removidas antes de realizar a análise de correlação, pois o log10(0) é indefinido. *# 
-#* Alem disso só faz sentido biologicamente analisar apenas linhagens que possuem elementos IS.*#
+#* Alem disso só faz sentido biologicamente analisar apenas linhagens que possuem elementos transponiveis (IS e TNs).*#
 dados_filtrados <- dados_transformados %>%
   filter(percent_is > 0)
 #* Não esquecer de ajustar o código, mudando a variavel dados_transformados para dados_filtrados nos proximos passos do codigo 
-\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
 
 ################################################################################
-# Calculando a correlação de Pearson (r e p-value) e o Coeficiente de Determinação (R²) de todas as cepas 
+# 2. Correlação de Pearson e coeficiente de determinação de todas as cepas
 ################################################################################
 
-# Realizar o teste de correlação de Pearson
-## A fórmula ~ y + x especifica as variáveis a serem correlacionadas.
+# Interromper a análise com uma mensagem clara se não houver observações
+# suficientes para calcular a correlação.
+if (nrow(dados_filtrados) < 3) {
+  stop("São necessárias pelo menos 3 observações válidas para a correlação de Pearson.")
+}
+
+# Calcular a correlação de Pearson entre as variáveis transformadas em log10.
 teste_correlacao <- cor.test(
   ~ log10_percent_is + log10_genome_size,
-  data = dados_transformados,
+  data = dados_filtrados,
   method = "pearson"
 )
-### Exibir os resultados completos do teste
+
+# Exibir os resultados completos do teste
 print(teste_correlacao)
 
-# Cálculo do Coeficiente de Determinação (R²)
-## Ajustar um modelo de regressão linear
-### A fórmula y ~ x indica que estamos modelando y como uma função de x.
-modelo_linear <- lm(log10_percent_is ~ log10_genome_size, data = dados_transformados)
-## Obter o resumo do modelo, que inclui o R-quadrado
+# Ajustar o modelo de regressão linear: percentual de TEs em função do tamanho
+# do genoma, com ambas as variáveis transformadas em log10.
+modelo_linear <- lm(
+  log10_percent_is ~ log10_genome_size,
+  data = dados_filtrados
+)
+
+# Obter e exibir o resumo do modelo, incluindo o R²
 resumo_modelo <- summary(modelo_linear)
-## Exibir o resumo completo
 print(resumo_modelo)
-### Somente o R-quadrado
-r_quadrado <- resumo_modelo$r.squared
-cat("O coeficiente de determinação (R-quadrado) é:", r_quadrado, "\n")
+
+# Extrair os principais resultados da análise geral
+r_geral <- unname(teste_correlacao$estimate)
+p_geral <- teste_correlacao$p.value
+r2_geral <- resumo_modelo$r.squared
+n_geral <- nrow(dados_filtrados)
+
+cat("\n====================================================\n")
+cat("RESULTADOS GERAIS\n")
+cat("====================================================\n")
+cat("Número de observações (n):", n_geral, "\n")
+cat("Correlação de Pearson (r):", round(r_geral, 4), "\n")
+cat("p-value:", format.pval(p_geral, digits = 4, eps = 0.0001), "\n")
+cat("Coeficiente de determinação (R²):", round(r2_geral, 4), "\n")
+cat("====================================================\n")
 
 ################################################################################
-# Calculando a correlação de Pearson (r e p-value) e o Coeficiente de Determinação (R²) por hospedeiro 
+# 3. Correlação de Pearson e R² por hospedeiro
 ################################################################################
 
-# Filtrar os dados por hospedeiro e realizar análises separadas
-
-# Função para realizar e imprimir a análise para um subgrupo de hospedeiro
 analisar_hospedeiro <- function(nome_hospedeiro) {
-  cat("====================================================\n")
-  cat("Análise para o Hospedeiro:", nome_hospedeiro, "\n")
+  cat("\n====================================================\n")
+  cat("Hospedeiro:", as.character(nome_hospedeiro), "\n")
   cat("====================================================\n")
   
-  # Filtrar o dataframe
-  dados_subgrupo <- dados_transformados %>%
+  # Filtrar somente as observações do hospedeiro atual.
+  dados_subgrupo <- dados_filtrados %>%
     filter(Host == nome_hospedeiro)
   
-  # Verificar se há dados suficientes para a análise
-  if (nrow(dados_subgrupo) < 3) {
-    cat("Não há dados suficientes para a análise.\n\n")
-    return(NULL)
+  # Remover pares não finitos, caso ainda exista algum valor problemático.
+  dados_subgrupo <- dados_subgrupo %>%
+    filter(
+      is.finite(log10_genome_size),
+      is.finite(log10_percent_is)
+    )
+  
+  numero_observacoes <- nrow(dados_subgrupo)
+  
+  # A correlação de Pearson exige pelo menos três pares completos. Também é
+  # necessário que as duas variáveis apresentem variação dentro do subgrupo.
+  if (
+    numero_observacoes < 3 ||
+    dplyr::n_distinct(dados_subgrupo$log10_genome_size) < 2 ||
+    dplyr::n_distinct(dados_subgrupo$log10_percent_is) < 2
+  ) {
+    cat("Análise não realizada: dados insuficientes ou sem variação.\n")
+    
+    return(data.frame(
+      Host = as.character(nome_hospedeiro),
+      n = numero_observacoes,
+      r = NA_real_,
+      p_value = NA_real_,
+      R2 = NA_real_,
+      status = "Dados insuficientes ou sem variação",
+      stringsAsFactors = FALSE
+    ))
   }
   
-  # Realizar o teste de correlação
-  teste_cor_subgrupo <- cor.test(
+  teste_subgrupo <- cor.test(
     ~ log10_percent_is + log10_genome_size,
-    data = dados_subgrupo
+    data = dados_subgrupo,
+    method = "pearson"
   )
   
-  # Ajustar o modelo linear
-  modelo_linear_subgrupo <- lm(
+  modelo_subgrupo <- lm(
     log10_percent_is ~ log10_genome_size,
     data = dados_subgrupo
   )
   
-  # Imprimir os resultados
-  print(teste_cor_subgrupo)
-  print(summary(modelo_linear_subgrupo))
+  r_subgrupo <- unname(teste_subgrupo$estimate)
+  p_subgrupo <- teste_subgrupo$p.value
+  r2_subgrupo <- summary(modelo_subgrupo)$r.squared
   
-  # Retornar os resultados para preencher a Tabela 2
-  return(list(
-    r = teste_cor_subgrupo$estimate,
-    p_value = teste_cor_subgrupo$p.value,
-    r_squared = summary(modelo_linear_subgrupo)$r.squared,
-    n = nrow(dados_subgrupo)
-  ))
+  cat("Número de observações (n):", numero_observacoes, "\n")
+  cat("Correlação de Pearson (r):", round(r_subgrupo, 4), "\n")
+  cat("p-value:", format.pval(p_subgrupo, digits = 4, eps = 0.0001), "\n")
+  cat("Coeficiente de determinação (R²):", round(r2_subgrupo, 4), "\n")
+  
+  data.frame(
+    Host = as.character(nome_hospedeiro),
+    n = numero_observacoes,
+    r = r_subgrupo,
+    p_value = p_subgrupo,
+    R2 = r2_subgrupo,
+    status = "Análise realizada",
+    stringsAsFactors = FALSE
+  )
 }
 
-# Executar a análise para cada hospedeiro presente nos dados
-## Obter a lista de hospedeiros únicos
-hospedeiros_unicos <- unique(dados_transformados$Host)
+# Obter a lista de hospedeiros únicos, descartando valores ausentes e vazios.
+hospedeiros_unicos <- unique(dados_filtrados$Host)
+hospedeiros_unicos <- hospedeiros_unicos[
+  !is.na(hospedeiros_unicos) & trimws(as.character(hospedeiros_unicos)) != ""
+]
 
-# Aplicar a função a cada hospedeiro
-## Armazenar os resultados em uma lista
-resultados_subgrupos <- lapply(hospedeiros_unicos, analisar_hospedeiro)
-## Nomear a lista com os nomes dos hospedeiros
-names(resultados_subgrupos) <- hospedeiros_unicos
+# Aplicar a função a cada hospedeiro e consolidar os resultados em um dataframe.
+resultados_por_hospedeiro <- lapply(
+  hospedeiros_unicos,
+  analisar_hospedeiro
+) %>%
+  bind_rows()
 
-### Exibir os resultados para cada hospedeiro
-resultados_subgrupos$Fish
-resultados_subgrupos$Human 
-resultados_subgrupos$Bovine
+# Exibir a tabela consolidada
+print(resultados_por_hospedeiro)
+
+################################################################################
+# 4. Gráfico geral da relação analisada
+################################################################################
+
+grafico_geral <- ggplot(
+  dados_filtrados,
+  aes(x = log10_genome_size, y = log10_percent_is)
+) +
+  geom_point(alpha = 0.7) +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(
+    title = "Relação entre o tamanho do genoma e o percentual de TEs",
+    subtitle = paste0(
+      "Pearson r = ", round(r_geral, 3),
+      "; p = ", format.pval(p_geral, digits = 3, eps = 0.001),
+      "; R² = ", round(r2_geral, 3),
+      "; n = ", n_geral
+    ),
+    x = "log10 do tamanho do genoma (bp)",
+    y = "log10 do percentual de TEs"
+  ) +
+  theme_classic()
+
+print(grafico_geral)
